@@ -111,14 +111,20 @@ class AttendanceApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.content)
 
-    def test_student_login_marks_once_and_creates_audit(self):
+    def _student_login(self):
         response = self.client.post(
             "/api/auth/login/student",
-            data={"numero_registro": self.student.numero_registro},
+            data={
+                "numero_registro": self.student.numero_registro,
+                "password": self.student.numero_registro,
+            },
             content_type="application/json",
             **self._csrf_headers(),
         )
         self.assertEqual(response.status_code, 200, response.content)
+
+    def test_student_login_marks_once_and_creates_audit(self):
+        self._student_login()
 
         response = self.client.post(
             "/api/student/attendance/mark",
@@ -255,12 +261,7 @@ class AttendanceApiTests(TestCase):
             hora_inicio=time(13, 0),
             hora_fin=time(14, 0),
         )
-        self.client.post(
-            "/api/auth/login/student",
-            data={"numero_registro": self.student.numero_registro},
-            content_type="application/json",
-            **self._csrf_headers(),
-        )
+        self._student_login()
         response = self.client.post(
             "/api/student/attendance/mark",
             data={},
@@ -313,12 +314,7 @@ class AttendanceApiTests(TestCase):
         self.class_session.es_cancelada = True
         self.class_session.motivo_cancelacion = "Lluvia"
         self.class_session.save(update_fields=["es_cancelada", "motivo_cancelacion"])
-        self.client.post(
-            "/api/auth/login/student",
-            data={"numero_registro": self.student.numero_registro},
-            content_type="application/json",
-            **self._csrf_headers(),
-        )
+        self._student_login()
 
         today = self.client.get("/api/student/attendance")
         self.assertEqual(today.status_code, 200, today.content)
@@ -344,12 +340,7 @@ class AttendanceApiTests(TestCase):
             hora_inicio=time(19, 0),
             hora_fin=time(22, 0),
         )
-        self.client.post(
-            "/api/auth/login/student",
-            data={"numero_registro": self.student.numero_registro},
-            content_type="application/json",
-            **self._csrf_headers(),
-        )
+        self._student_login()
 
         schedule = self.client.get("/api/student/schedule")
         self.assertEqual(schedule.status_code, 200, schedule.content)
@@ -382,12 +373,7 @@ class AttendanceApiTests(TestCase):
             es_cancelada=True,
             motivo_cancelacion="Lluvia",
         )
-        self.client.post(
-            "/api/auth/login/student",
-            data={"numero_registro": self.student.numero_registro},
-            content_type="application/json",
-            **self._csrf_headers(),
-        )
+        self._student_login()
 
         response = self.client.get("/api/student/schedule")
 

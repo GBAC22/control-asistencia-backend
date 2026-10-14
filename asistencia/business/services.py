@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 from zipfile import BadZipFile
 
-from django.contrib.auth.hashers import check_password
+from django.contrib.auth.hashers import check_password, make_password
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from openpyxl import load_workbook
@@ -21,7 +21,6 @@ from asistencia.models import (
     ModuloAcademico,
     UsuarioAdmin,
 )
-
 MAX_EXCEL_BYTES = 10 * 1024 * 1024
 
 
@@ -32,10 +31,13 @@ class ServiceError(Exception):
         self.message = message
 
 
-def authenticate_student(registration_number: str) -> Estudiante:
+def authenticate_student(registration_number: str, password: str = "") -> Estudiante:
     registration_number = registration_number.strip()
     if not registration_number:
         raise ServiceError("El número de registro es obligatorio.")
+    password = password.strip()
+    if not password:
+        raise ServiceError("La contraseña es obligatoria.")
     module = repositories.get_active_module()
     if module is None:
         raise ServiceError("No hay un módulo activo.", 403)
@@ -43,7 +45,15 @@ def authenticate_student(registration_number: str) -> Estudiante:
         registration_number, module.id_modulo
     )
     if student is None:
-        raise ServiceError("El número de registro no pertenece al módulo activo.", 401)
+        raise ServiceError("Credenciales incorrectas.", 401)
+    if student.password_hash:
+        if not check_password(password, student.password_hash):
+            raise ServiceError("Credenciales incorrectas.", 401)
+    else:
+        if password != student.numero_registro:
+            raise ServiceError("Credenciales incorrectas.", 401)
+        student.password_hash = make_password(password)
+        student.save(update_fields=["password_hash"])
     return student
 
 
@@ -516,11 +526,15 @@ def _read_student_sheet(sheet) -> list[dict[str, Any]]:
         email = row.get("correo_electronico")
         if email is not None and not isinstance(email, str):
             email = str(email).strip()
+        pwd = row.get("contrasena") or row.get("password")
+        if pwd is not None:
+            pwd = str(pwd).strip()
         parsed.append(
             {
                 "numero_registro": registration,
                 "nombre_completo": name,
                 "correo_electronico": email.strip() if email else None,
+                "password_hash": make_password(pwd if pwd else registration),
             }
         )
     if not parsed:
@@ -590,3 +604,37 @@ def _write_audit(
         valor_anterior=previous,
         valor_nuevo=new,
     )
+
+
+def change_student_password(
+    student_id: UUID, current_password: str, new_password: str
+) -> None:
+    current_password = current_password.strip()
+    new_password = new_password.strip()
+    if not current_password or not new_password:
+        raise ServiceError("La contraseña actual y la nueva son obligatorias.")
+    if len(new_password) < 4:
+        raise ServiceError("La nueva contraseña debe tener al menos 4 caracteres.")
+
+    with transaction.atomic():
+        student = repositories.get_student(student_id)
+        if student is None or not student.modulo.es_activo:
+            raise ServiceError("El estudiante no pertenece al módulo activo.", 403)
+        if student.password_hash:
+            if not check_password(current_password, student.password_hash):
+                raise ServiceError("La contraseña actual es incorrecta.", 401)
+        else:
+            if current_password != student.numero_registro:
+                raise ServiceError("La contraseña actual es incorrecta.", 401)
+
+        student.password_hash = make_password(new_password)
+        student.save(update_fields=["password_hash"])
+        _write_audit(
+            module=student.modulo,
+            actor=student.numero_registro,
+            role=AuditoriaActividad.RolActor.ESTUDIANTE,
+            action="CAMBIAR_PASSWORD",
+            entity="estudiantes",
+            previous=None,
+            new={"id_estudiante": str(student.id_estudiante), "numero_registro": student.numero_registro},
+        )
