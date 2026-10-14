@@ -25,6 +25,11 @@ urlpatterns = [
         views.mark_attendance,
         name="mark-attendance",
     ),
+    path(
+        "api/student/password/change",
+        views.student_change_password,
+        name="student-change-password",
+    ),
     path("api/admin/modules", views.admin_modules, name="admin-modules"),
     path(
         "api/admin/modules/<uuid:module_id>/classes",

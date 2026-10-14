@@ -130,7 +130,11 @@ def health(request: HttpRequest) -> JsonResponse:
 def student_login(request: HttpRequest) -> JsonResponse:
     try:
         payload = _json_body(request)
-        student = services.authenticate_student(str(payload.get("numero_registro", "")))
+        password = str(payload.get("password", "") or payload.get("contrasena", ""))
+        student = services.authenticate_student(
+            str(payload.get("numero_registro", "")),
+            password,
+        )
     except services.ServiceError as error:
         return _service_error(error)
     request.session.cycle_key()
@@ -248,6 +252,21 @@ def mark_attendance(request: HttpRequest) -> JsonResponse:
         },
         status=201,
     )
+
+
+@require_POST
+@_student_required
+def student_change_password(request: HttpRequest) -> JsonResponse:
+    try:
+        payload = _json_body(request)
+        services.change_student_password(
+            request.student_actor.id_estudiante,
+            str(payload.get("current_password", "") or payload.get("password_actual", "")),
+            str(payload.get("new_password", "") or payload.get("nueva_password", "")),
+        )
+    except services.ServiceError as error:
+        return _service_error(error)
+    return JsonResponse({"detail": "Contraseña actualizada correctamente."})
 
 
 @require_GET
@@ -428,6 +447,7 @@ def update_admin_attendance(request: HttpRequest) -> JsonResponse:
 def admin_audit_log(request: HttpRequest) -> JsonResponse:
     module_id = request.GET.get("id_modulo")
     date_text = request.GET.get("fecha")
+    role_filter = request.GET.get("rol")
     try:
         parsed_module_id = _uuid(module_id, "módulo") if module_id else None
         parsed_date = date.fromisoformat(date_text) if date_text else None
@@ -437,7 +457,9 @@ def admin_audit_log(request: HttpRequest) -> JsonResponse:
         return _service_error(error)
 
     logs = repositories.get_audit_logs(parsed_module_id, parsed_date)
-    paginator = Paginator(logs, 100)
+    if role_filter and role_filter.upper() in ("ADMIN", "ESTUDIANTE"):
+        logs = logs.filter(rol_actor=role_filter.upper())
+    paginator = Paginator(logs, 50)
     try:
         page = paginator.page(request.GET.get("pagina", "1"))
     except (EmptyPage, ValueError):
@@ -446,6 +468,7 @@ def admin_audit_log(request: HttpRequest) -> JsonResponse:
         {
             "id_auditoria": str(item.id_auditoria),
             "id_modulo": str(item.modulo_id),
+            "nombre_modulo": item.modulo.nombre if item.modulo else "",
             "usuario_actor": item.usuario_actor,
             "rol_actor": item.rol_actor,
             "accion": item.accion,
