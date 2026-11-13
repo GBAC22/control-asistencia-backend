@@ -80,6 +80,7 @@ class Estudiante(models.Model):
     nombre_completo = models.CharField(max_length=255)
     correo_electronico = models.CharField(max_length=255, null=True, blank=True)
     password_hash = models.CharField(max_length=255, null=True, blank=True)
+    initial_password_ciphertext = models.TextField(null=True, blank=True)
     creado_en = models.DateTimeField(
         default=timezone.now,
         db_default=models.functions.Now(),

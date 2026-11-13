@@ -18,6 +18,9 @@ Edit `.env` with local database settings and a secret `DJANGO_SECRET_KEY`. Never
 commit `.env` or real student data. Apply migrations and start the development
 server:
 
+For student imports, also configure a separate `STUDENT_INITIAL_PASSWORDS_KEY`;
+see [credential workflow and security](CAMBIOS-CREDENCIALES.md).
+
 ```powershell
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8000

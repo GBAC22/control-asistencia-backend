@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from io import BytesIO
+import secrets
 from typing import Any
 from uuid import UUID
 from zipfile import BadZipFile
 
+from cryptography.fernet import Fernet, InvalidToken
+from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from asistencia.data_access import repositories
@@ -29,6 +32,14 @@ class ServiceError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+def _initial_password_cipher() -> Fernet:
+    key = settings.STUDENT_INITIAL_PASSWORDS_KEY
+    try:
+        return Fernet(key.encode("ascii"))
+    except (ValueError, TypeError, UnicodeEncodeError) as exc:
+        raise ServiceError("No está configurada una clave válida para credenciales iniciales.", 503) from exc
 
 
 def authenticate_student(registration_number: str, password: str = "") -> Estudiante:
@@ -313,6 +324,7 @@ def import_module_workbook(
     if len(workbook_content) > MAX_EXCEL_BYTES:
         raise ServiceError("El archivo supera el límite de 10 MB.", 413)
 
+    cipher = _initial_password_cipher()
     try:
         workbook = load_workbook(BytesIO(workbook_content), read_only=True, data_only=True)
     except (InvalidFileException, BadZipFile, OSError) as exc:
@@ -326,7 +338,7 @@ def import_module_workbook(
         )
 
     try:
-        students = _read_student_sheet(workbook["estudiantes"])
+        students = _read_student_sheet(workbook["estudiantes"], cipher)
         class_dates = _read_class_sheet(workbook["fechas_clase"])
     finally:
         workbook.close()
@@ -371,6 +383,38 @@ def import_module_workbook(
             },
         )
     return {"estudiantes": len(students), "fechas_clase": len(class_dates)}
+
+
+def initial_password_workbook(module_id: UUID, admin: UsuarioAdmin) -> bytes:
+    cipher = _initial_password_cipher()
+    with transaction.atomic():
+        module = repositories.get_module_for_update(module_id)
+        if module is None:
+            raise ServiceError("No se encontró el módulo.", 404)
+        students = repositories.get_students_for_module(module_id).select_for_update().filter(
+            initial_password_ciphertext__isnull=False
+        )
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "credenciales"
+        sheet.append(["numero_registro", "nombre_completo", "contrasena_inicial"])
+        try:
+            for student in students:
+                password = cipher.decrypt(student.initial_password_ciphertext.encode("ascii")).decode("utf-8")
+                sheet.append([student.numero_registro, student.nombre_completo, password])
+                for cell in sheet[sheet.max_row]:
+                    cell.data_type = "s"
+        except (InvalidToken, UnicodeError) as exc:
+            raise ServiceError("No se pudieron descifrar las credenciales iniciales; verifique la clave.", 503) from exc
+        result = BytesIO()
+        workbook.save(result)
+        workbook.close()
+        _write_audit(
+            module=module, actor=admin.correo, role=AuditoriaActividad.RolActor.ADMIN,
+            action="DESCARGAR_CREDENCIALES", entity="estudiantes",
+            previous=None, new={"cantidad": sheet.max_row - 1},
+        )
+        return result.getvalue()
 
 
 def attendance_report(
@@ -489,7 +533,7 @@ def set_class_cancellation(
         return class_session
 
 
-def _read_sheet_rows(sheet, required_headers: set[str]) -> list[dict[str, Any]]:
+def _read_sheet_rows(sheet, required_headers: set[str], forbidden_headers: set[str] | None = None) -> list[dict[str, Any]]:
     rows = sheet.iter_rows(values_only=True)
     try:
         headers = [str(value).strip() if value is not None else "" for value in next(rows)]
@@ -497,6 +541,8 @@ def _read_sheet_rows(sheet, required_headers: set[str]) -> list[dict[str, Any]]:
         raise ServiceError(f"La hoja '{sheet.title}' está vacía.") from exc
     if len(headers) != len(set(headers)):
         raise ServiceError(f"La hoja '{sheet.title}' contiene encabezados repetidos.")
+    if forbidden_headers and forbidden_headers.intersection(headers):
+        raise ServiceError("El Excel no debe incluir contraseñas; se generan automáticamente.")
     missing = required_headers - set(headers)
     if missing:
         raise ServiceError(
@@ -517,8 +563,8 @@ def _read_sheet_rows(sheet, required_headers: set[str]) -> list[dict[str, Any]]:
     return entries
 
 
-def _read_student_sheet(sheet) -> list[dict[str, Any]]:
-    entries = _read_sheet_rows(sheet, {"numero_registro", "nombre_completo"})
+def _read_student_sheet(sheet, cipher: Fernet) -> list[dict[str, Any]]:
+    entries = _read_sheet_rows(sheet, {"numero_registro", "nombre_completo"}, {"contrasena", "password"})
     parsed = []
     for row_number, row in enumerate(entries, start=2):
         registration = _required_text(row["numero_registro"], "numero_registro", row_number)
@@ -526,15 +572,14 @@ def _read_student_sheet(sheet) -> list[dict[str, Any]]:
         email = row.get("correo_electronico")
         if email is not None and not isinstance(email, str):
             email = str(email).strip()
-        pwd = row.get("contrasena") or row.get("password")
-        if pwd is not None:
-            pwd = str(pwd).strip()
+        password = secrets.token_urlsafe(18)
         parsed.append(
             {
                 "numero_registro": registration,
                 "nombre_completo": name,
                 "correo_electronico": email.strip() if email else None,
-                "password_hash": make_password(pwd if pwd else registration),
+                "password_hash": make_password(password),
+                "initial_password_ciphertext": cipher.encrypt(password.encode("utf-8")).decode("ascii"),
             }
         )
     if not parsed:
@@ -615,9 +660,11 @@ def change_student_password(
         raise ServiceError("La contraseña actual y la nueva son obligatorias.")
     if len(new_password) < 4:
         raise ServiceError("La nueva contraseña debe tener al menos 4 caracteres.")
+    if current_password == new_password:
+        raise ServiceError("La nueva contraseña debe ser diferente de la actual.")
 
     with transaction.atomic():
-        student = repositories.get_student(student_id)
+        student = repositories.get_student_for_update(student_id)
         if student is None or not student.modulo.es_activo:
             raise ServiceError("El estudiante no pertenece al módulo activo.", 403)
         if student.password_hash:
@@ -628,7 +675,8 @@ def change_student_password(
                 raise ServiceError("La contraseña actual es incorrecta.", 401)
 
         student.password_hash = make_password(new_password)
-        student.save(update_fields=["password_hash"])
+        student.initial_password_ciphertext = None
+        student.save(update_fields=["password_hash", "initial_password_ciphertext"])
         _write_audit(
             module=student.modulo,
             actor=student.numero_registro,

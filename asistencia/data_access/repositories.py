@@ -31,6 +31,10 @@ def get_student(student_id: UUID) -> Estudiante | None:
     return Estudiante.objects.select_related("modulo").filter(pk=student_id).first()
 
 
+def get_student_for_update(student_id: UUID) -> Estudiante | None:
+    return Estudiante.objects.select_for_update(of=("self",)).select_related("modulo").filter(pk=student_id).first()
+
+
 def get_admin(admin_id: UUID) -> UsuarioAdmin | None:
     return UsuarioAdmin.objects.filter(pk=admin_id).first()
 

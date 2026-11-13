@@ -52,6 +52,11 @@ urlpatterns = [
         name="import-module",
     ),
     path(
+        "api/admin/modules/<uuid:module_id>/initial-passwords",
+        views.download_initial_passwords,
+        name="initial-passwords",
+    ),
+    path(
         "api/admin/classes/<uuid:class_id>/cancel",
         views.cancel_admin_class,
         name="cancel-admin-class",
