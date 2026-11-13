@@ -5,9 +5,10 @@ import logging
 from datetime import date
 from uuid import UUID
 
+from django.conf import settings
 from django.core.paginator import EmptyPage, Paginator
 from django.db import DatabaseError, connection
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
@@ -124,6 +125,19 @@ def health(request: HttpRequest) -> JsonResponse:
         logger.exception("Database health check failed.")
         return JsonResponse({"status": "unavailable", "database": "unavailable"}, status=503)
     return JsonResponse({"status": "ok", "database": "ok"})
+
+
+@require_GET
+def tenant_info(request: HttpRequest) -> JsonResponse:
+    values = (settings.TENANT_SLUG, settings.TENANT_NAME, settings.TENANT_PLAN)
+    if not any(values):
+        return JsonResponse({"tenant": None})
+    if not all(values):
+        logger.error("La configuración de identidad del tenant está incompleta.")
+        return JsonResponse({"error": "La configuración del tenant está incompleta."}, status=503)
+    return JsonResponse({
+        "tenant": {"slug": values[0], "name": values[1], "plan": values[2]},
+    })
 
 
 @require_POST
@@ -373,6 +387,17 @@ def import_module(request: HttpRequest, module_id: str) -> JsonResponse:
     except services.ServiceError as error:
         return _service_error(error)
     return JsonResponse({"importados": counts}, status=201)
+
+
+@require_GET
+@_admin_required
+def download_initial_passwords(request: HttpRequest, module_id: str) -> HttpResponse:
+    content = services.initial_password_workbook(_uuid(module_id, "módulo"), request.admin_actor)
+    response = HttpResponse(content, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response["Content-Disposition"] = 'attachment; filename="credenciales-iniciales.xlsx"'
+    response["Cache-Control"] = "no-store, private"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @require_GET

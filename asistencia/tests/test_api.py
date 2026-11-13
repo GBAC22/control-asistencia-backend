@@ -2,12 +2,13 @@ from datetime import date, time, timedelta
 from io import BytesIO, StringIO
 from unittest.mock import patch
 
+from cryptography.fernet import Fernet
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from asistencia.models import (
     Asistencia,
@@ -19,6 +20,27 @@ from asistencia.models import (
 )
 
 
+class TenantIdentityTests(SimpleTestCase):
+    @override_settings(TENANT_SLUG="i4-demo", TENANT_NAME="Institución Ejemplo", TENANT_PLAN="Estándar")
+    def test_public_identity_contains_no_admin_or_secrets(self):
+        response = self.client.get("/api/tenant")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "tenant": {"slug": "i4-demo", "name": "Institución Ejemplo", "plan": "Estándar"},
+        })
+
+    @override_settings(TENANT_SLUG="", TENANT_NAME="", TENANT_PLAN="")
+    def test_standalone_mode_has_no_tenant(self):
+        self.assertEqual(self.client.get("/api/tenant").json(), {"tenant": None})
+
+    @override_settings(TENANT_SLUG="i4-demo", TENANT_NAME="", TENANT_PLAN="Estándar")
+    def test_partial_identity_fails_explicitly(self):
+        with self.assertLogs("asistencia.presentation.views", level="ERROR"):
+            response = self.client.get("/api/tenant")
+        self.assertEqual(response.status_code, 503)
+
+
+@override_settings(STUDENT_INITIAL_PASSWORDS_KEY=Fernet.generate_key().decode("ascii"))
 class AttendanceApiTests(TestCase):
     def setUp(self):
         today = timezone.localdate()
@@ -450,6 +472,116 @@ class AttendanceApiTests(TestCase):
                 modulo=module, accion="IMPORTAR_EXCEL"
             ).exists()
         )
+
+    def test_initial_password_download_is_repeatable_and_removed_on_change(self):
+        module = ModuloAcademico.objects.create(
+            nombre="Credenciales",
+            fecha_inicio=timezone.localdate(),
+            fecha_fin=timezone.localdate() + timedelta(days=7),
+            es_activo=False,
+        )
+        workbook = Workbook()
+        students = workbook.active
+        students.title = "estudiantes"
+        students.append(["numero_registro", "nombre_completo"])
+        students.append(["=REG-002", "Nueva Persona"])
+        students["A2"].data_type = "s"
+        classes = workbook.create_sheet("fechas_clase")
+        classes.append(["fecha", "hora_inicio", "hora_fin"])
+        classes.append([timezone.localdate(), time(9, 0), time(11, 0)])
+        content = BytesIO()
+        workbook.save(content)
+        endpoint = f"/api/admin/modules/{module.id_modulo}/initial-passwords"
+        self.assertEqual(self.client.get(endpoint).status_code, 401)
+        self._admin_login()
+        response = self.client.post(
+            f"/api/admin/modules/{module.id_modulo}/import",
+            data={"archivo": SimpleUploadedFile("modulo.xlsx", content.getvalue())},
+            **self._csrf_headers(),
+        )
+        self.assertEqual(response.status_code, 201)
+        student = Estudiante.objects.get(modulo=module)
+        self.assertTrue(student.initial_password_ciphertext)
+        first = self.client.get(endpoint)
+        second = self.client.get(endpoint)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertIn("no-store", first["Cache-Control"])
+        first_sheet = load_workbook(BytesIO(first.content)).active
+        second_sheet = load_workbook(BytesIO(second.content)).active
+        self.assertEqual(first_sheet["A2"].data_type, "s")
+        password = first_sheet["C2"].value
+        self.assertEqual(password, second_sheet["C2"].value)
+        self.assertNotEqual(password, student.numero_registro)
+        self.assertTrue(check_password(password, student.password_hash))
+        self.assertNotIn(password, student.initial_password_ciphertext)
+        with override_settings(STUDENT_INITIAL_PASSWORDS_KEY=Fernet.generate_key().decode("ascii")):
+            self.assertEqual(self.client.get(endpoint).status_code, 503)
+        self.module.es_activo = False
+        self.module.save(update_fields=["es_activo"])
+        module.es_activo = True
+        module.save(update_fields=["es_activo"])
+        self.client.post("/api/auth/logout", data={}, content_type="application/json", **self._csrf_headers())
+        login = self.client.post(
+            "/api/auth/login/student",
+            data={"numero_registro": student.numero_registro, "password": password},
+            content_type="application/json", **self._csrf_headers(),
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(self.client.get(endpoint).status_code, 401)
+        same = self.client.post(
+            "/api/student/password/change",
+            data={"current_password": password, "new_password": password},
+            content_type="application/json", **self._csrf_headers(),
+        )
+        self.assertEqual(same.status_code, 400)
+        student.refresh_from_db()
+        self.assertTrue(student.initial_password_ciphertext)
+        changed = self.client.post(
+            "/api/student/password/change",
+            data={"current_password": password, "new_password": "different-password"},
+            content_type="application/json", **self._csrf_headers(),
+        )
+        self.assertEqual(changed.status_code, 200)
+        student.refresh_from_db()
+        self.assertIsNone(student.initial_password_ciphertext)
+        self.client.post("/api/auth/logout", data={}, content_type="application/json", **self._csrf_headers())
+        self._admin_login()
+        final = self.client.get(endpoint)
+        self.assertEqual(final.status_code, 200)
+        self.assertEqual(load_workbook(BytesIO(final.content)).active.max_row, 1)
+
+    @override_settings(STUDENT_INITIAL_PASSWORDS_KEY="")
+    def test_initial_password_key_is_required(self):
+        self._admin_login()
+        response = self.client.get(f"/api/admin/modules/{self.module.id_modulo}/initial-passwords")
+        self.assertEqual(response.status_code, 503)
+
+    def test_import_rejects_password_columns_without_creating_students(self):
+        module = ModuloAcademico.objects.create(
+            nombre="Contraseñas no permitidas",
+            fecha_inicio=timezone.localdate(),
+            fecha_fin=timezone.localdate() + timedelta(days=7),
+            es_activo=False,
+        )
+        workbook = Workbook()
+        students = workbook.active
+        students.title = "estudiantes"
+        students.append(["numero_registro", "nombre_completo", "password"])
+        students.append(["REG-002", "Nueva Persona", ""])
+        classes = workbook.create_sheet("fechas_clase")
+        classes.append(["fecha", "hora_inicio", "hora_fin"])
+        classes.append([timezone.localdate(), time(9, 0), time(11, 0)])
+        content = BytesIO()
+        workbook.save(content)
+        self._admin_login()
+        response = self.client.post(
+            f"/api/admin/modules/{module.id_modulo}/import",
+            data={"archivo": SimpleUploadedFile("modulo.xlsx", content.getvalue())},
+            **self._csrf_headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Estudiante.objects.filter(modulo=module).exists())
 
     def test_health_endpoint_checks_database(self):
         response = self.client.get("/api/health")
