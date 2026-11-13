@@ -5,6 +5,7 @@ from asistencia.presentation import views
 urlpatterns = []
 urlpatterns = [
     path("api/health", views.health, name="health"),
+    path("api/tenant", views.tenant_info, name="tenant-info"),
     path("api/auth/csrf", views.csrf_token, name="csrf-token"),
     path("api/auth/login/student", views.student_login, name="student-login"),
     path("api/auth/login/admin", views.admin_login, name="admin-login"),

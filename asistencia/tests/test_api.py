@@ -6,7 +6,7 @@ from cryptography.fernet import Fernet
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 
@@ -18,6 +18,26 @@ from asistencia.models import (
     ModuloAcademico,
     UsuarioAdmin,
 )
+
+
+class TenantIdentityTests(SimpleTestCase):
+    @override_settings(TENANT_SLUG="i4-demo", TENANT_NAME="Institución Ejemplo", TENANT_PLAN="Estándar")
+    def test_public_identity_contains_no_admin_or_secrets(self):
+        response = self.client.get("/api/tenant")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "tenant": {"slug": "i4-demo", "name": "Institución Ejemplo", "plan": "Estándar"},
+        })
+
+    @override_settings(TENANT_SLUG="", TENANT_NAME="", TENANT_PLAN="")
+    def test_standalone_mode_has_no_tenant(self):
+        self.assertEqual(self.client.get("/api/tenant").json(), {"tenant": None})
+
+    @override_settings(TENANT_SLUG="i4-demo", TENANT_NAME="", TENANT_PLAN="Estándar")
+    def test_partial_identity_fails_explicitly(self):
+        with self.assertLogs("asistencia.presentation.views", level="ERROR"):
+            response = self.client.get("/api/tenant")
+        self.assertEqual(response.status_code, 503)
 
 
 @override_settings(STUDENT_INITIAL_PASSWORDS_KEY=Fernet.generate_key().decode("ascii"))

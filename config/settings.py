@@ -11,6 +11,9 @@ load_dotenv(BASE_DIR / ".env")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
 STUDENT_INITIAL_PASSWORDS_KEY = os.getenv("STUDENT_INITIAL_PASSWORDS_KEY", "")
+TENANT_SLUG = os.getenv("TENANT_SLUG", "").strip()
+TENANT_NAME = os.getenv("TENANT_NAME", "").strip()
+TENANT_PLAN = os.getenv("TENANT_PLAN", "").strip()
 if not SECRET_KEY:
     if not DEBUG:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is false.")

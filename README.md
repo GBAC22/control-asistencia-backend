@@ -21,6 +21,12 @@ server:
 For student imports, also configure a separate `STUDENT_INITIAL_PASSWORDS_KEY`;
 see [credential workflow and security](CAMBIOS-CREDENCIALES.md).
 
+For a tenant deployment, set `TENANT_SLUG`, `TENANT_NAME` and `TENANT_PLAN`
+together. `GET /api/tenant` publishes only these non-secret values for the
+frontend. With all three unset, the application retains its standalone
+generic identity; a partial configuration returns HTTP 503. The plan name is
+informational and does not enforce a student quota.
+
 ```powershell
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8000
